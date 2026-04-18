@@ -1,0 +1,26 @@
+{
+  "name": "mappainter",
+  "version": "0.1.0",
+  "description": "Create good-looking city maps with ease",
+  "homepage": "https://github.com/theinfamousben/mappainter#readme",
+  "bugs": {
+    "url": "https://github.com/theinfamousben/mappainter/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/theinfamousben/mappainter.git"
+  },
+  "license": "GPL-3.0",
+  "author": "theinfamousben",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "echo \"No tests yet\""
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^7.1.7"
+  }
+}
