@@ -11,3 +11,5 @@ export const BUILDING_COLORS: Record<BuildingType, string> = {
   commercial: "#b1b6c9",
   industrial: "#bea88a"
 };
+
+export const MINIMUM_INTERSECTION_VICINITY = 10;

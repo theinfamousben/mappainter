@@ -1,17 +1,18 @@
-import { BUILDING_COLORS, ROAD_STYLES } from "./constants";
 import { must, must2dContext } from "./dom";
 import {
-  dedupeConsecutivePoints,
-  lanePixels,
-  normalize,
   normalizeRect,
-  offsetPolyline,
-  pointToSegmentDistance,
-  samePoint,
-  sampleQuadraticCurve,
-  segmentIntersectionWithParameters,
-  segmentIntersectsRect
+  sampleQuadraticCurve
 } from "./geometry";
+import {
+  generateAutoBuildings as generateAutoBuildingsForRoads,
+  pruneConflictingBuildings as pruneConflictingBuildingsForRoads
+} from "./app/building-logic";
+import { findBuildingAt as findBuildingAtPoint, findRoadAt as findRoadAtPoint } from "./app/hit-testing";
+import {
+  calculateIntersectionsDetailed as calculateRoadIntersections,
+  splitRoadNetworkAtIntersections as splitRoadNetwork
+} from "./app/road-network";
+import { renderScene } from "./app/renderer";
 import { isValidProject } from "./project";
 import { APP_TEMPLATE } from "./template";
 import type {
@@ -21,7 +22,6 @@ import type {
   IntersectionInfo,
   MapProject,
   Point,
-  Rect,
   Road,
   RoadDrawMode,
   RoadType,
@@ -59,6 +59,7 @@ export class MapPainterApp {
   private curveAnchorPoint: Point | null = null;
   private buildingDragStart: Point | null = null;
   private buildingDragCurrent: Point | null = null;
+  private currentRoadBidirectionality: boolean = true; // TODO: Implement unidirectional roads
 
   private isPanning = false;
   private panStartScreen: Point | null = null;
@@ -446,12 +447,14 @@ export class MapPainterApp {
       return;
     }
 
-    const lanes = clamp(parseInt(this.roadLanesInput.value, 10) || 1, 1, 8);
+    const _lanes = clamp(parseInt(this.roadLanesInput.value, 10) || 1, 1, 8);
     const road: Road = {
       id: nextId("road"),
       type: this.roadTypeInput.value as RoadType,
-      lanes,
-      points: [...this.currentRoadPoints]
+      lanes: _lanes,
+      points: [...this.currentRoadPoints],
+      bidirectional: this.currentRoadBidirectionality
+
     };
     this.roads.push(road);
     this.splitRoadNetworkAtIntersections();
@@ -526,289 +529,27 @@ export class MapPainterApp {
   }
 
   private findBuildingAt(point: Point): Building | null {
-    for (let i = this.buildings.length - 1; i >= 0; i -= 1) {
-      const b = this.buildings[i];
-      if (point.x >= b.x && point.x <= b.x + b.width && point.y >= b.y && point.y <= b.y + b.height) {
-        return b;
-      }
-    }
-    return null;
+    return findBuildingAtPoint(point, this.buildings);
   }
 
   private findRoadAt(point: Point): Road | null {
-    const tolerance = 10 / this.camera.zoom;
-    for (let i = this.roads.length - 1; i >= 0; i -= 1) {
-      const road = this.roads[i];
-      for (let p = 1; p < road.points.length; p += 1) {
-        const distance = pointToSegmentDistance(point, road.points[p - 1], road.points[p]);
-        const width = lanePixels(road) * 0.5 + tolerance;
-        if (distance <= width) {
-          return road;
-        }
-      }
-    }
-    return null;
+    return findRoadAtPoint(point, this.roads, this.camera.zoom);
   }
 
   private generateAutoBuildings(): number {
-    this.buildings = this.buildings.filter((b) => b.source === "manual");
-    let created = 0;
-
-    for (const road of this.roads) {
-      for (let i = 1; i < road.points.length; i += 1) {
-        const a = road.points[i - 1];
-        const b = road.points[i];
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const length = Math.hypot(dx, dy);
-        if (length < 20) {
-          continue;
-        }
-
-        const nx = -dy / length;
-        const ny = dx / length;
-        const spacing = 38;
-        const count = Math.floor(length / spacing);
-        const halfRoad = lanePixels(road) * 0.5;
-
-        for (let n = 1; n <= count; n += 1) {
-          const t = (n * spacing) / length;
-          const cx = a.x + dx * t;
-          const cy = a.y + dy * t;
-
-          for (const side of [-1, 1] as const) {
-            const depth = 18 + ((n + (side === 1 ? 2 : 0)) % 3) * 5;
-            const width = 16 + ((n + (side === 1 ? 1 : 0)) % 4) * 4;
-            const offset = halfRoad + 12 + depth * 0.5;
-
-            const centerX = cx + nx * side * offset;
-            const centerY = cy + ny * side * offset;
-
-            const candidate: Building = {
-              id: nextId("building"),
-              source: "auto",
-              type: this.inferBuildingType(road.type, n),
-              x: centerX - width * 0.5,
-              y: centerY - depth * 0.5,
-              width,
-              height: depth
-            };
-
-            if (!this.collidesBuilding(candidate) && !this.collidesWithRoadNetwork(candidate)) {
-              this.buildings.push(candidate);
-              created += 1;
-            }
-          }
-        }
-      }
-    }
-
-    return created;
-  }
-
-  private inferBuildingType(roadType: RoadType, index: number): BuildingType {
-    if (roadType === "highway") {
-      return index % 2 === 0 ? "industrial" : "commercial";
-    }
-    if (roadType === "avenue") {
-      return index % 3 === 0 ? "commercial" : "residential";
-    }
-    return index % 5 === 0 ? "commercial" : "residential";
-  }
-
-  private collidesBuilding(candidate: Building): boolean {
-    for (const existing of this.buildings) {
-      if (
-        candidate.x < existing.x + existing.width &&
-        candidate.x + candidate.width > existing.x &&
-        candidate.y < existing.y + existing.height &&
-        candidate.y + candidate.height > existing.y
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private collidesWithRoadNetwork(candidate: Building): boolean {
-    for (const road of this.roads) {
-      if (this.buildingCollidesWithRoad(candidate, road)) {
-        return true;
-      }
-    }
-    return false;
+    const generated = generateAutoBuildingsForRoads(this.roads, this.buildings);
+    this.buildings = generated.buildings;
+    return generated.created;
   }
 
   private pruneConflictingBuildings(): number {
-    const before = this.buildings.length;
-    this.buildings = this.buildings.filter((building) => !this.collidesWithRoadNetwork(building));
-    return before - this.buildings.length;
-  }
-
-  private buildingCollidesWithRoad(building: Building, road: Road): boolean {
-    if (road.points.length < 2) {
-      return false;
-    }
-
-    const halfWidth = lanePixels(road) * 0.5;
-    const expanded: Rect = {
-      x: building.x - halfWidth,
-      y: building.y - halfWidth,
-      width: building.width + halfWidth * 2,
-      height: building.height + halfWidth * 2
-    };
-
-    for (let i = 1; i < road.points.length; i += 1) {
-      const a = road.points[i - 1];
-      const b = road.points[i];
-      if (segmentIntersectsRect(a, b, expanded)) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  private calculateIntersectionsDetailed(): IntersectionInfo[] {
-    const intersections: IntersectionInfo[] = [];
-
-    for (let i = 0; i < this.roads.length; i += 1) {
-      const aRoad = this.roads[i];
-      for (let j = i + 1; j < this.roads.length; j += 1) {
-        const bRoad = this.roads[j];
-
-        if (aRoad.type === "highway" || bRoad.type === "highway") {
-          continue;
-        }
-
-        for (let sa = 1; sa < aRoad.points.length; sa += 1) {
-          const a1 = aRoad.points[sa - 1];
-          const a2 = aRoad.points[sa];
-          for (let sb = 1; sb < bRoad.points.length; sb += 1) {
-            const b1 = bRoad.points[sb - 1];
-            const b2 = bRoad.points[sb];
-            const hit = segmentIntersectionWithParameters(a1, a2, b1, b2);
-            if (!hit) {
-              continue;
-            }
-
-            const duplicate = intersections.some(
-              (info) => Math.hypot(info.point.x - hit.point.x, info.point.y - hit.point.y) < 2
-            );
-            if (duplicate) {
-              continue;
-            }
-
-            intersections.push({
-              point: hit.point,
-              roadAId: aRoad.id,
-              roadBId: bRoad.id,
-              widthA: lanePixels(aRoad),
-              widthB: lanePixels(bRoad),
-              dirA: normalize({ x: a2.x - a1.x, y: a2.y - a1.y }),
-              dirB: normalize({ x: b2.x - b1.x, y: b2.y - b1.y })
-            });
-          }
-        }
-      }
-    }
-
-    return intersections;
+    const result = pruneConflictingBuildingsForRoads(this.buildings, this.roads);
+    this.buildings = result.buildings;
+    return result.removed;
   }
 
   private splitRoadNetworkAtIntersections() {
-    const epsilon = 0.001;
-    const splitMap = new Map<string, Map<number, Array<{ t: number; point: Point }>>>();
-
-    for (const road of this.roads) {
-      splitMap.set(road.id, new Map());
-    }
-
-    for (let i = 0; i < this.roads.length; i += 1) {
-      const aRoad = this.roads[i];
-      for (let j = i + 1; j < this.roads.length; j += 1) {
-        const bRoad = this.roads[j];
-        if (aRoad.type === "highway" || bRoad.type === "highway") {
-          continue;
-        }
-
-        for (let sa = 1; sa < aRoad.points.length; sa += 1) {
-          const a1 = aRoad.points[sa - 1];
-          const a2 = aRoad.points[sa];
-          for (let sb = 1; sb < bRoad.points.length; sb += 1) {
-            const b1 = bRoad.points[sb - 1];
-            const b2 = bRoad.points[sb];
-            const hit = segmentIntersectionWithParameters(a1, a2, b1, b2);
-            if (!hit) {
-              continue;
-            }
-
-            if (hit.tA > epsilon && hit.tA < 1 - epsilon) {
-              this.addSplitPoint(splitMap, aRoad.id, sa, hit.tA, hit.point);
-            }
-            if (hit.tB > epsilon && hit.tB < 1 - epsilon) {
-              this.addSplitPoint(splitMap, bRoad.id, sb, hit.tB, hit.point);
-            }
-          }
-        }
-      }
-    }
-
-    const rebuilt: Road[] = [];
-    for (const road of this.roads) {
-      const bySegment = splitMap.get(road.id);
-      if (!bySegment || bySegment.size === 0) {
-        rebuilt.push(road);
-        continue;
-      }
-
-      let current: Point[] = [road.points[0]];
-      for (let seg = 1; seg < road.points.length; seg += 1) {
-        const segmentEnd = road.points[seg];
-        const splits = [...(bySegment.get(seg) ?? [])].sort((a, b) => a.t - b.t);
-
-        for (const split of splits) {
-          if (!samePoint(current[current.length - 1], split.point)) {
-            current.push(split.point);
-          }
-          if (current.length >= 2) {
-            rebuilt.push({ ...road, id: nextId("road"), points: dedupeConsecutivePoints(current) });
-          }
-          current = [split.point];
-        }
-
-        if (!samePoint(current[current.length - 1], segmentEnd)) {
-          current.push(segmentEnd);
-        }
-      }
-
-      if (current.length >= 2) {
-        rebuilt.push({ ...road, id: nextId("road"), points: dedupeConsecutivePoints(current) });
-      }
-    }
-
-    this.roads = rebuilt.filter((road) => road.points.length >= 2);
-  }
-
-  private addSplitPoint(
-    splitMap: Map<string, Map<number, Array<{ t: number; point: Point }>>>,
-    roadId: string,
-    segmentIndex: number,
-    t: number,
-    point: Point
-  ) {
-    const roadMap = splitMap.get(roadId);
-    if (!roadMap) {
-      return;
-    }
-    const list = roadMap.get(segmentIndex) ?? [];
-    const duplicate = list.some(
-      (entry) => Math.hypot(entry.point.x - point.x, entry.point.y - point.y) < 1.5
-    );
-    if (!duplicate) {
-      list.push({ t, point });
-    }
-    roadMap.set(segmentIndex, list);
+    this.roads = splitRoadNetwork(this.roads);
   }
 
   private saveProject() {
@@ -829,7 +570,7 @@ export class MapPainterApp {
   }
 
   private refreshIntersections() {
-    this.intersectionsCache = this.calculateIntersectionsDetailed();
+    this.intersectionsCache = calculateRoadIntersections(this.roads);
   }
 
   private setPaused(nextPaused: boolean) {
@@ -855,264 +596,29 @@ export class MapPainterApp {
   }
 
   private render() {
-    const width = this.viewportWidth;
-    const height = this.viewportHeight;
-    this.ctx.clearRect(0, 0, width, height);
-
-    this.drawTerrain(width, height);
-
-    this.ctx.save();
-    this.applyCamera();
-
-    this.drawGrid(width, height);
-    this.drawRoads();
-    this.drawBuildings();
-    this.drawIntersections();
-    this.drawRoadPreview();
-    this.drawBuildingPreview();
-
-    this.ctx.restore();
-  }
-
-  private drawTerrain(width: number, height: number) {
-    const gradient = this.ctx.createLinearGradient(0, 0, width, height);
-    gradient.addColorStop(0, "#9dbc84");
-    gradient.addColorStop(1, "#7f9f71");
-    this.ctx.fillStyle = gradient;
-    this.ctx.fillRect(0, 0, width, height);
-
-    this.ctx.globalAlpha = 0.09;
-    for (let i = 0; i < 22; i += 1) {
-      const x = (i * 151) % width;
-      const y = (i * 97) % height;
-      this.ctx.beginPath();
-      this.ctx.ellipse(x, y, 120, 45, 0.5, 0, Math.PI * 2);
-      this.ctx.fillStyle = "#d8e6c4";
-      this.ctx.fill();
-    }
-    this.ctx.globalAlpha = 1;
-  }
-
-  private applyCamera() {
-    this.ctx.translate(this.viewportWidth * 0.5, this.viewportHeight * 0.5);
-    this.ctx.scale(this.camera.zoom, this.camera.zoom);
-    this.ctx.translate(-this.camera.x, -this.camera.y);
-  }
-
-  private drawGrid(width: number, height: number) {
-    const worldTopLeft = this.screenToWorld(0, 0);
-    const worldBottomRight = this.screenToWorld(width, height);
-    const spacing = 80;
-
-    this.ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-    this.ctx.lineWidth = 1 / this.camera.zoom;
-
-    const startX = Math.floor(worldTopLeft.x / spacing) * spacing;
-    const endX = Math.ceil(worldBottomRight.x / spacing) * spacing;
-    const startY = Math.floor(worldTopLeft.y / spacing) * spacing;
-    const endY = Math.ceil(worldBottomRight.y / spacing) * spacing;
-
-    for (let x = startX; x <= endX; x += spacing) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(x, startY);
-      this.ctx.lineTo(x, endY);
-      this.ctx.stroke();
-    }
-
-    for (let y = startY; y <= endY; y += spacing) {
-      this.ctx.beginPath();
-      this.ctx.moveTo(startX, y);
-      this.ctx.lineTo(endX, y);
-      this.ctx.stroke();
-    }
-  }
-
-  private drawRoads() {
-    for (const road of this.roads) {
-      if (road.points.length < 2) {
-        continue;
-      }
-
-      const style = ROAD_STYLES[road.type];
-      const width = lanePixels(road);
-
-      this.ctx.lineJoin = "round";
-      this.ctx.lineCap = "round";
-
-      this.ctx.strokeStyle = style.edge;
-      this.ctx.lineWidth = width + 3;
-      this.drawPolyline(road.points);
-
-      this.ctx.strokeStyle = style.color;
-      this.ctx.lineWidth = width;
-      this.drawPolyline(road.points);
-
-      const selected = this.selection.kind === "road" && this.selection.id === road.id;
-      if (selected) {
-        this.ctx.strokeStyle = "#ffd36c";
-        this.ctx.lineWidth = width + 6;
-        this.ctx.globalAlpha = 0.45;
-        this.drawPolyline(road.points);
-        this.ctx.globalAlpha = 1;
-      }
-
-      this.drawLaneMarks(road, width);
-    }
-  }
-
-  private drawLaneMarks(road: Road, width: number) {
-    if (road.lanes <= 1) {
-      return;
-    }
-    this.ctx.strokeStyle = "rgba(250, 250, 250, 0.75)";
-    this.ctx.lineWidth = 1.4;
-    this.ctx.setLineDash([7, 7]);
-
-    for (let lane = 1; lane < road.lanes; lane += 1) {
-      const offset = -width * 0.5 + (width / road.lanes) * lane;
-      const shifted = offsetPolyline(road.points, offset);
-      if (shifted.length > 1) {
-        this.drawPolyline(shifted);
-      }
-    }
-
-    this.ctx.setLineDash([]);
-  }
-
-  private drawBuildings() {
-    for (const building of this.buildings) {
-      const selected = this.selection.kind === "building" && this.selection.id === building.id;
-
-      this.ctx.fillStyle = BUILDING_COLORS[building.type];
-      this.ctx.fillRect(building.x, building.y, building.width, building.height);
-
-      this.ctx.lineWidth = selected ? 2.5 / this.camera.zoom : 1.2 / this.camera.zoom;
-      this.ctx.strokeStyle = selected ? "#ffd36c" : "rgba(40, 36, 30, 0.5)";
-      this.ctx.strokeRect(building.x, building.y, building.width, building.height);
-
-      if (building.source === "auto") {
-        this.ctx.strokeStyle = "rgba(255,255,255,0.45)";
-        this.ctx.setLineDash([4 / this.camera.zoom, 3 / this.camera.zoom]);
-        this.ctx.strokeRect(building.x, building.y, building.width, building.height);
-        this.ctx.setLineDash([]);
-      }
-    }
-  }
-
-  private drawRoadPreview() {
-    if (this.tool !== "road" || this.currentRoadPoints.length === 0) {
-      return;
-    }
-
-    const lanes = clamp(parseInt(this.roadLanesInput.value, 10) || 1, 1, 8);
-    const ghostRoad: Road = {
-      id: "preview",
-      type: this.roadTypeInput.value as RoadType,
-      lanes,
-      points: []
-    };
-
-    const preview = [...this.currentRoadPoints];
-    if (this.roadDrawMode === "curve" && this.curveAnchorPoint && this.roadPreviewPoint) {
-      const start = this.currentRoadPoints[this.currentRoadPoints.length - 1];
-      const curveGhost = sampleQuadraticCurve(start, this.curveAnchorPoint, this.roadPreviewPoint, 24);
-      preview.push(...curveGhost.slice(1));
-    } else if (this.roadPreviewPoint) {
-      preview.push(this.roadPreviewPoint);
-    }
-
-    ghostRoad.points = preview;
-    const ghostWidth = lanePixels(ghostRoad);
-
-    this.ctx.strokeStyle = "rgba(255, 233, 180, 0.35)";
-    this.ctx.lineWidth = ghostWidth + 4;
-    this.drawPolyline(preview);
-
-    this.ctx.strokeStyle = "rgba(255, 204, 107, 0.95)";
-    this.ctx.lineWidth = 4;
-    this.ctx.setLineDash([10, 8]);
-    this.drawPolyline(preview);
-    this.ctx.setLineDash([]);
-
-    for (const point of this.currentRoadPoints) {
-      this.ctx.beginPath();
-      this.ctx.fillStyle = "#ffe6b2";
-      this.ctx.arc(point.x, point.y, 3.2, 0, Math.PI * 2);
-      this.ctx.fill();
-    }
-
-    if (this.curveAnchorPoint) {
-      this.ctx.beginPath();
-      this.ctx.fillStyle = "#ff8a4e";
-      this.ctx.arc(this.curveAnchorPoint.x, this.curveAnchorPoint.y, 4, 0, Math.PI * 2);
-      this.ctx.fill();
-    }
-
-    if (this.roadPreviewPoint) {
-      this.ctx.beginPath();
-      this.ctx.strokeStyle = "#fff2ce";
-      this.ctx.lineWidth = 1.5;
-      this.ctx.arc(this.roadPreviewPoint.x, this.roadPreviewPoint.y, 5, 0, Math.PI * 2);
-      this.ctx.stroke();
-    }
-  }
-
-  private drawIntersections() {
-    for (const info of this.intersectionsCache) {
-      const drawDecal = (dir: Point, width: number) => {
-        const len = Math.max(16, width * 1.2);
-        const a: Point = {
-          x: info.point.x - dir.x * len * 0.5,
-          y: info.point.y - dir.y * len * 0.5
-        };
-        const b: Point = {
-          x: info.point.x + dir.x * len * 0.5,
-          y: info.point.y + dir.y * len * 0.5
-        };
-
-        this.ctx.lineCap = "round";
-        this.ctx.strokeStyle = "rgba(245, 247, 240, 0.82)";
-        this.ctx.lineWidth = Math.max(2, width * 0.16);
-        this.ctx.beginPath();
-        this.ctx.moveTo(a.x, a.y);
-        this.ctx.lineTo(b.x, b.y);
-        this.ctx.stroke();
-      };
-
-      drawDecal(info.dirA, info.widthA);
-      drawDecal(info.dirB, info.widthB);
-
-      this.ctx.beginPath();
-      this.ctx.fillStyle = "rgba(255, 210, 136, 0.9)";
-      this.ctx.arc(info.point.x, info.point.y, 2.6, 0, Math.PI * 2);
-      this.ctx.fill();
-    }
-  }
-
-  private drawBuildingPreview() {
-    if (!this.buildingDragStart || !this.buildingDragCurrent) {
-      return;
-    }
-    const rect = normalizeRect(this.buildingDragStart, this.buildingDragCurrent);
-    this.ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
-    this.ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
-    this.ctx.strokeStyle = "rgba(255, 240, 199, 0.95)";
-    this.ctx.lineWidth = 2 / this.camera.zoom;
-    this.ctx.setLineDash([5 / this.camera.zoom, 3 / this.camera.zoom]);
-    this.ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
-    this.ctx.setLineDash([]);
-  }
-
-  private drawPolyline(points: Point[]) {
-    if (points.length < 2) {
-      return;
-    }
-    this.ctx.beginPath();
-    this.ctx.moveTo(points[0].x, points[0].y);
-    for (let i = 1; i < points.length; i += 1) {
-      this.ctx.lineTo(points[i].x, points[i].y);
-    }
-    this.ctx.stroke();
+    renderScene(
+      this.ctx,
+      this.viewportWidth,
+      this.viewportHeight,
+      {
+        camera: this.camera,
+        roads: this.roads,
+        buildings: this.buildings,
+        selection: this.selection,
+        intersections: this.intersectionsCache,
+        tool: this.tool,
+        roadDrawMode: this.roadDrawMode,
+        currentRoadPoints: this.currentRoadPoints,
+        roadPreviewPoint: this.roadPreviewPoint,
+        curveAnchorPoint: this.curveAnchorPoint,
+        buildingDragStart: this.buildingDragStart,
+        buildingDragCurrent: this.buildingDragCurrent,
+        roadTypeValue: this.roadTypeInput.value as RoadType,
+        roadLanesValue: this.roadLanesInput.value,
+        currentRoadBidirectionality: this.currentRoadBidirectionality,
+      },
+      (screenX, screenY) => this.screenToWorld(screenX, screenY)
+    );
   }
 
   private screenToWorld(screenX: number, screenY: number): Point {
