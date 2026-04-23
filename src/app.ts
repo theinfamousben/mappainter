@@ -265,7 +265,15 @@ export class MapPainterApp {
     });
     this.canvas.addEventListener("wheel", (event) => this.onWheel(event), { passive: false });
     this.canvas.addEventListener("dblclick", () => this.commitRoad());
-    this.canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+    this.canvas.addEventListener("contextmenu", (event) => { 
+      event.preventDefault(); 
+      this.currentRoadPoints = [];
+      this.roadPreviewPoint = null;
+      this.buildingDragStart = null;
+      this.buildingDragCurrent = null;
+      this.requestRender();
+      this.updateStatus("Canceled active gesture.");
+    });
 
     window.addEventListener("keydown", (event) => {
       if (event.key.toLowerCase() === "p") {
@@ -283,14 +291,7 @@ export class MapPainterApp {
       if (event.key === "Enter" && this.tool === "road") {
         this.commitRoad();
       }
-      if (event.key === "Escape") {
-        this.currentRoadPoints = [];
-        this.roadPreviewPoint = null;
-        this.buildingDragStart = null;
-        this.buildingDragCurrent = null;
-        this.requestRender();
-        this.updateStatus("Canceled active gesture.");
-      }
+
       if (event.key.toLowerCase() === "delete" || event.key.toLowerCase() === "backspace") {
         if (this.selection.kind === "road") {
           const selectedRoadId = this.selection.id;
@@ -563,7 +564,7 @@ export class MapPainterApp {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = "mappainter-project.json";
+    link.download = "mappainter-project-" + new Date().toISOString() + ".json";
     link.click();
     URL.revokeObjectURL(url);
     this.updateStatus("Project saved to JSON file.");

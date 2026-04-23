@@ -15,9 +15,7 @@ import type {
 import { nextId } from "../utils";
 import { MINIMUM_INTERSECTION_VICINITY } from "../constants";
 
-export function combineIntersections(
-    intersections: IntersectionInfo[],
-): n_IntersectionInfo[] {
+export function combineIntersections(intersections: IntersectionInfo[]): n_IntersectionInfo[] {
     const combined: n_IntersectionInfo[] = [];
     const minDistance = MINIMUM_INTERSECTION_VICINITY;
 
