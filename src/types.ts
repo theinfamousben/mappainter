@@ -51,6 +51,7 @@ export type route = {
 };
 
 export type n_IntersectionInfo = {
+    intersectionId: string;
     point: Point;
     roadIds: string[];
     widths: number[];

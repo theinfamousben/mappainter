@@ -34,6 +34,7 @@ export function combineIntersections(intersections: IntersectionInfo[]): n_Inter
                 widths: [info.widthA, info.widthB],
                 directions: [info.dirA, info.dirB],
                 entryPoints: [],
+                intersectionId: nextId("intersection")
             };
             combined.push(_info);
         }
@@ -48,13 +49,25 @@ function calculateEntryPoints(intersection: n_IntersectionInfo): EntryPoint[] {
     for (const roadId of intersection.roadIds) {
         const road: Road = getRoadById(roadId);
         const lastPoint = road.points[road.points.length - 1];
+
+        const midpoint: Point = {
+            x: intersection.point.x - (intersection.point.x - lastPoint.x) / 2,
+            y: intersection.point.y - (intersection.point.y - lastPoint.y) / 2
+        };
+
         const angle = Math.pow(
             Math.tan(
-                (intersection.point.y - lastPoint.y) /
-                (intersection.point.x - lastPoint.x)
+                (midpoint.y - lastPoint.y) /
+                (midpoint.x - lastPoint.x)
             ),
             -1
-        )
+        );
+
+        entryPoints.push({
+            id: intersection.intersectionId + "-" + intersection.roadIds.indexOf(roadId),
+            position: midpoint,
+            direction: "in"
+        });
 
         
     }
