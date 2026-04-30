@@ -13,3 +13,4 @@ export const BUILDING_COLORS: Record<BuildingType, string> = {
 };
 
 export const MINIMUM_INTERSECTION_VICINITY = 10;
+export const MINIMUM_ENTRY_POINT_DISTANCE = 5;

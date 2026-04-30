@@ -13,7 +13,7 @@ import type {
     Road,
 } from "../types";
 import { nextId } from "../utils";
-import { MINIMUM_INTERSECTION_VICINITY } from "../constants";
+import { MINIMUM_INTERSECTION_VICINITY, MINIMUM_ENTRY_POINT_DISTANCE } from "../constants";
 
 export function combineIntersections(
     intersections: IntersectionInfo[],
@@ -56,7 +56,17 @@ function calculateEntryPoints(intersection: n_IntersectionInfo): EntryPoint[] {
                 (intersection.point.x - lastPoint.x)
             ),
             -1
-        )
+        );
+
+        const entryPointPosition: Point = {
+            x: intersection.point.x - Math.cos(angle) * MINIMUM_ENTRY_POINT_DISTANCE,
+            y: intersection.point.y - Math.sin(angle) * MINIMUM_ENTRY_POINT_DISTANCE,
+        }
+
+        const _entryPoint: EntryPoint = {
+            id: "",
+            position: entryPointPosition,
+        }
 
         
     }
